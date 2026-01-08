@@ -3,7 +3,8 @@
 -- + Revive system (Extra Life pass OR small revive dev product)
 -- + Auto-revive after dev product purchase
 -- + Spectator works in lobby + for mid-match joiners
--- + NEW: 5s "Round 1 begins in..." countdown ONLY once per match start
+-- + NEW: 5s countdown BEFORE EACH ROUND (no double Round 1)
+-- + NEW: Round timer + Match timer fed to StatusUI via RoundInfo RemoteEvent
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -59,8 +60,8 @@ local SMALL_REVIVE_PRODUCT = 3498314947 -- must match MonetisationGrants
 local REVIVE_TIMEOUT = 10
 local NO_REVIVES_IF_MATCH_SIZE_LEQ = 2
 
--- ===== NEW: PRE-ROUND COUNTDOWN (ONLY ONCE) =====
-local PRE_ROUND_COUNTDOWN = 5
+-- ===== NEW: ROUND COUNTDOWN (EVERY ROUND) =====
+local ROUND_START_COUNTDOWN = 5
 
 -- ===== REFERENCES =====
 local mapTilesFolder = workspace:WaitForChild("MapTiles")
@@ -79,14 +80,23 @@ local function getOrMakeRemote(name: string)
 	return r
 end
 
-local statusEvent   = getOrMakeRemote("RoundStatus")
+local statusEvent   = getOrMakeRemote("RoundStatus")     -- existing text feed
 local earningsEvent = getOrMakeRemote("MatchEarnings")
 local matchState    = getOrMakeRemote("MatchState")
 local spectateEvent = getOrMakeRemote("SpectateEvent")
 local reviveRemote  = getOrMakeRemote("ReviveRemote")
 
-local function broadcast(msg)
+-- NEW structured timer feed (StatusUI can subscribe without breaking old text)
+local roundInfoEvent = getOrMakeRemote("RoundInfo")
+
+local function broadcast(msg: string)
 	statusEvent:FireAllClients(tostring(msg))
+end
+
+local function fireRoundInfo(payload)
+	-- payload example:
+	-- { inMatch=true, phase="Round", round=2, roundCount=4, roundRemaining=12, matchRemaining=68, alive=5 }
+	roundInfoEvent:FireAllClients(payload)
 end
 
 -- ===== READY =====
@@ -736,17 +746,22 @@ while true do
 		end)
 	end)
 
-	-- ===== NEW: PRE-ROUND COUNTDOWN (ONLY ONCE PER MATCH) =====
-	local PRE_ROUND = true
-	for i = PRE_ROUND_COUNTDOWN, 1, -1 do
-		-- Only a friendly countdown. No tiles, no kills yet.
-		broadcast(("Round 1 begins in %d..."):format(i))
-		task.wait(1)
-	end
-	broadcast("Round 1 GO!")
-	PRE_ROUND = false
-	-- =========================================================
+	-- ===== MATCH TIMER TRACKING =====
+	local matchStart = os.clock()
 
+	-- A reasonable "planned" match length (used for UI only)
+	-- (Countdown + round time) for each round, plus between-round gaps, plus sudden death max.
+	local plannedMatchLen =
+		(ROUND_COUNT * (ROUND_START_COUNTDOWN + ROUND_TIME)) +
+		((ROUND_COUNT - 1) * BETWEEN_ROUNDS) +
+		SUDDEN_DEATH_TIME
+
+	local function getMatchRemaining()
+		local elapsed = os.clock() - matchStart
+		return math.max(0, math.floor(plannedMatchLen - elapsed))
+	end
+
+	-- ===== Anti-idle tracking =====
 	local nextPay = os.clock() + SURVIVAL_COIN_INTERVAL
 	local lastPos: {[Player]: Vector3} = {}
 	local lastMoveTime: {[Player]: number} = {}
@@ -776,10 +791,13 @@ while true do
 		end)
 	end
 
-	-- Heartbeat kill / anti-idle / anti-outside (STARTS AFTER COUNTDOWN)
+	-- Kills active only AFTER countdown for each round
+	local killsEnabled = false
+
+	-- Heartbeat kill / anti-idle / anti-outside
 	local killConn
 	killConn = RunService.Heartbeat:Connect(function()
-		if PRE_ROUND then return end -- << IMPORTANT: no kills during countdown
+		if not killsEnabled then return end
 
 		for _, plr in ipairs(matchPlayers) do
 			if plr.Parent ~= Players then continue end
@@ -835,6 +853,27 @@ while true do
 		if #alive == 1 then LAST_STANDING = alive[1] end
 		if #alive <= 1 then break end
 
+		-- ===== ROUND START COUNTDOWN (EVERY ROUND) =====
+		killsEnabled = false
+		for i = ROUND_START_COUNTDOWN, 1, -1 do
+			local aliveNow = alivePlayers(matchPlayers)
+			fireRoundInfo({
+				inMatch = true,
+				phase = "Countdown",
+				round = round,
+				roundCount = ROUND_COUNT,
+				roundRemaining = i,
+				matchRemaining = getMatchRemaining(),
+				alive = #aliveNow,
+			})
+			broadcast(("Round %d begins in %d..."):format(round, i))
+			task.wait(1)
+		end
+
+		-- Round begins
+		killsEnabled = true
+		broadcast(("Round %d GO!"):format(round))
+
 		local radius = currentActiveRadius
 		local interval = STEP_INTERVAL[round] or 0.6
 		local breaksPer = BREAKS_PER_STEP[round] or 3
@@ -846,12 +885,15 @@ while true do
 			candidates = buildCandidates(maxR)
 		end
 
-		local endTime = os.clock() + ROUND_TIME
-		while os.clock() < endTime do
+		local roundEndTime = os.clock() + ROUND_TIME
+		local nextUIBeat = 0
+
+		while os.clock() < roundEndTime do
 			alive = alivePlayers(matchPlayers)
 			if #alive == 1 then LAST_STANDING = alive[1] end
 			if #alive <= 1 then break end
 
+			-- survival pay
 			if os.clock() >= nextPay then
 				for _, p in ipairs(alive) do
 					earnedThisMatch[p] += SURVIVAL_COINS_PER_TICK
@@ -859,7 +901,22 @@ while true do
 				nextPay = os.clock() + SURVIVAL_COIN_INTERVAL
 			end
 
-			broadcast(("Round %d/%d | Alive: %d"):format(round, ROUND_COUNT, #alive))
+			-- UI feed (about 4x a second max, stops spam)
+			local now = os.clock()
+			if now >= nextUIBeat then
+				nextUIBeat = now + 0.25
+				local roundRemaining = math.max(0, math.floor(roundEndTime - now))
+				fireRoundInfo({
+					inMatch = true,
+					phase = "Round",
+					round = round,
+					roundCount = ROUND_COUNT,
+					roundRemaining = roundRemaining,
+					matchRemaining = getMatchRemaining(),
+					alive = #alive,
+				})
+				broadcast(("Round %d/%d | %ds | Alive: %d"):format(round, ROUND_COUNT, roundRemaining, #alive))
+			end
 
 			if #candidates < (breaksPer + 5) then
 				candidates = buildCandidates(radius)
@@ -880,6 +937,17 @@ while true do
 		end
 
 		broadcast("Round " .. round .. " ended.")
+		fireRoundInfo({
+			inMatch = true,
+			phase = "Between",
+			round = round,
+			roundCount = ROUND_COUNT,
+			roundRemaining = 0,
+			matchRemaining = getMatchRemaining(),
+			alive = #alivePlayers(matchPlayers),
+		})
+
+		killsEnabled = false
 		task.wait(BETWEEN_ROUNDS)
 	end
 
@@ -893,13 +961,30 @@ while true do
 		currentWarningSteps = SUDDEN_WARNING
 		currentRespawnDelay = TILE_RESPAWN_SUDDEN
 
+		killsEnabled = true
 		local endSD = os.clock() + SUDDEN_DEATH_TIME
+		local nextUIBeat = 0
+
 		while os.clock() < endSD do
 			alive = alivePlayers(matchPlayers)
 			if #alive == 1 then LAST_STANDING = alive[1] end
 			if #alive <= 1 then break end
 
-			broadcast(("SUDDEN DEATH | Alive: %d"):format(#alive))
+			local now = os.clock()
+			if now >= nextUIBeat then
+				nextUIBeat = now + 0.25
+				local sdRemaining = math.max(0, math.floor(endSD - now))
+				fireRoundInfo({
+					inMatch = true,
+					phase = "SuddenDeath",
+					round = ROUND_COUNT,
+					roundCount = ROUND_COUNT,
+					roundRemaining = sdRemaining,
+					matchRemaining = getMatchRemaining(),
+					alive = #alive,
+				})
+				broadcast(("SUDDEN DEATH | %ds | Alive: %d"):format(sdRemaining, #alive))
+			end
 
 			local candidates = buildCandidates(maxR * 0.7)
 			if #candidates < 20 then candidates = buildCandidates(maxR) end
@@ -915,6 +1000,8 @@ while true do
 			task.wait(SUDDEN_INTERVAL)
 		end
 	end
+
+	killsEnabled = false
 
 	alive = alivePlayers(matchPlayers)
 	if #alive == 1 then
@@ -933,8 +1020,6 @@ while true do
 
 	-- ===== END MATCH =====
 	MATCH_RUNNING = false
-	PRE_ROUND = false
-
 	if joinConn then joinConn:Disconnect() end
 	if killConn then killConn:Disconnect() end
 
@@ -967,6 +1052,7 @@ while true do
 	end
 
 	matchState:FireAllClients(false)
+	fireRoundInfo({ inMatch = false })
 	CURRENT_MATCH_PLAYERS = {}
 
 	task.wait(3)
