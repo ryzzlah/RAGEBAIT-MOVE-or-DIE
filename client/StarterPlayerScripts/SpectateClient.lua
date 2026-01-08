@@ -186,30 +186,45 @@ local function enterSpectate()
 	spectateEvent:FireServer("RequestList")
 end
 
-local function exitSpectate()
+local function exitSpectate(keepGui: boolean?)
 	if not isSpectating then return end
 	isSpectating = false
-	gui.Enabled = false
+	gui.Enabled = keepGui == true
 	setOtherUIHidden(false)
 	setCameraToUserId(nil)
+	if keepGui == true then
+		title.Text = "SPECTATE PAUSED"
+	end
 end
 
 local function refreshState()
 	if shouldSpectateNow() then
 		enterSpectate()
 	else
-		exitSpectate()
+		exitSpectate(spectateOptOut and inMatch)
 	end
 end
 
 -- Buttons
 prevBtn.MouseButton1Click:Connect(function()
-	if not isSpectating then return end
+	if not isSpectating then
+		if inMatch and spectateOptOut then
+			spectateOptOut = false
+			enterSpectate()
+		end
+		return
+	end
 	spectateEvent:FireServer("Prev")
 end)
 
 nextBtn.MouseButton1Click:Connect(function()
-	if not isSpectating then return end
+	if not isSpectating then
+		if inMatch and spectateOptOut then
+			spectateOptOut = false
+			enterSpectate()
+		end
+		return
+	end
 	spectateEvent:FireServer("Next")
 end)
 
@@ -219,9 +234,6 @@ exitBtn.MouseButton1Click:Connect(function()
 	-- - camera back to self
 	-- - keep spectate UI closed until they press next/prev again
 	spectateOptOut = true
-	exitSpectate()
-end)
-
 -- Server pushes target
 spectateEvent.OnClientEvent:Connect(function(kind, payload)
 	if kind == "SetTarget" then
@@ -242,7 +254,7 @@ matchState.OnClientEvent:Connect(function(state)
 	if not inMatch then
 		-- Match ended: hard reset spectate
 		spectateOptOut = false
-		exitSpectate()
+
 	else
 		refreshState()
 	end
