@@ -234,9 +234,6 @@ exitBtn.MouseButton1Click:Connect(function()
 	-- - camera back to self
 	-- - keep spectate UI closed until they press next/prev again
 	spectateOptOut = true
-	exitSpectate(true)
-end)
-
 -- Server pushes target
 spectateEvent.OnClientEvent:Connect(function(kind, payload)
 	if kind == "SetTarget" then
@@ -257,7 +254,7 @@ matchState.OnClientEvent:Connect(function(state)
 	if not inMatch then
 		-- Match ended: hard reset spectate
 		spectateOptOut = false
-		exitSpectate(false)
+
 	else
 		refreshState()
 	end
