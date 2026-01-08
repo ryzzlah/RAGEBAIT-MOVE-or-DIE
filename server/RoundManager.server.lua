@@ -971,4 +971,3 @@ while true do
 
 	task.wait(3)
 end
-
