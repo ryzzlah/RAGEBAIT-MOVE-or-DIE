@@ -19,6 +19,7 @@ local spectateEvent = ReplicatedStorage:WaitForChild("SpectateEvent") -- RemoteE
 local inMatch = false
 local isSpectating = false
 local currentTargetUserId = nil
+local spectateOptOut = false
 
 -- ========= UI helpers =========
 local function mk(parent, class, props)
@@ -109,7 +110,9 @@ local savedGuiEnabled = {}
 
 local function shouldKeepGui(screenGui: ScreenGui)
 	if screenGui == gui then return true end
-	if screenGui.Name == "StatusGui" then return true end -- keep Status UI visible
+	if screenGui.Name == "StatusGui" or screenGui.Name == "RoundStatusUI" then
+		return true
+	end -- keep Status UI visible
 	return false
 end
 
@@ -161,6 +164,7 @@ end
 -- ========= state logic =========
 local function shouldSpectateNow()
 	if not inMatch then return false end
+	if spectateOptOut then return false end
 
 	local inRoundAttr = player:GetAttribute("InRound") == true
 	local aliveAttr = player:GetAttribute("AliveInRound") == true
@@ -178,35 +182,51 @@ end
 local function enterSpectate()
 	if isSpectating then return end
 	isSpectating = true
+	spectateOptOut = false
 	gui.Enabled = true
 	setOtherUIHidden(true)
 	spectateEvent:FireServer("RequestList")
 end
 
-local function exitSpectate()
+local function exitSpectate(keepGui: boolean?)
 	if not isSpectating then return end
 	isSpectating = false
-	gui.Enabled = false
+	gui.Enabled = keepGui == true
 	setOtherUIHidden(false)
 	setCameraToUserId(nil)
+	if keepGui == true then
+		title.Text = "SPECTATE PAUSED"
+	end
 end
 
 local function refreshState()
 	if shouldSpectateNow() then
 		enterSpectate()
 	else
-		exitSpectate()
+		exitSpectate(spectateOptOut and inMatch)
 	end
 end
 
 -- Buttons
 prevBtn.MouseButton1Click:Connect(function()
-	if not isSpectating then return end
+	if not isSpectating then
+		if inMatch and spectateOptOut then
+			spectateOptOut = false
+			enterSpectate()
+		end
+		return
+	end
 	spectateEvent:FireServer("Prev")
 end)
 
 nextBtn.MouseButton1Click:Connect(function()
-	if not isSpectating then return end
+	if not isSpectating then
+		if inMatch and spectateOptOut then
+			spectateOptOut = false
+			enterSpectate()
+		end
+		return
+	end
 	spectateEvent:FireServer("Next")
 end)
 
@@ -215,7 +235,8 @@ exitBtn.MouseButton1Click:Connect(function()
 	-- - restore UI (so they can chill)
 	-- - camera back to self
 	-- - keep spectate UI closed until they press next/prev again
-	exitSpectate()
+	spectateOptOut = true
+	exitSpectate(true)
 end)
 
 -- Server pushes target
@@ -237,7 +258,8 @@ matchState.OnClientEvent:Connect(function(state)
 	inMatch = state == true
 	if not inMatch then
 		-- Match ended: hard reset spectate
-		exitSpectate()
+		spectateOptOut = false
+		exitSpectate(false)
 	else
 		refreshState()
 	end
@@ -245,10 +267,14 @@ end)
 
 -- Attribute changes (elimination, join mid-round, etc)
 player:GetAttributeChangedSignal("InRound"):Connect(refreshState)
-player:GetAttributeChangedSignal("AliveInRound"):Connect(refreshState)
+player:GetAttributeChangedSignal("AliveInRound"):Connect(function()
+	if player:GetAttribute("AliveInRound") == true then
+		spectateOptOut = false
+	end
+	refreshState()
+end)
 
 -- If they spawn in while match is already running, this catches it
 task.defer(function()
 	refreshState()
 end)
-

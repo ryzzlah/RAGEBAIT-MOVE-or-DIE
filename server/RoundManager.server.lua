@@ -235,33 +235,6 @@ local function alivePlayers(matchPlayers: {Player})
 	return t
 end
 
--- ===== SPECTATE =====
--- Anyone can request targets during a running match as long as they are NOT alive in-round.
-spectateEvent.OnServerEvent:Connect(function(plr, action)
-	if action ~= "GetTargets" then return end
-
-	if not MATCH_RUNNING then
-		spectateEvent:FireClient(plr, "Targets", {})
-		return
-	end
-
-	local alive = plr:GetAttribute("AliveInRound") == true
-	if alive then
-		spectateEvent:FireClient(plr, "Targets", {})
-		return
-	end
-
-	local ids = {}
-	for _, p in ipairs(CURRENT_MATCH_PLAYERS) do
-		if p and p.Parent == Players then
-			if p:GetAttribute("InRound") == true and p:GetAttribute("AliveInRound") == true then
-				table.insert(ids, p.UserId)
-			end
-		end
-	end
-	spectateEvent:FireClient(plr, "Targets", ids)
-end)
-
 -- ===== REVIVE HELPERS =====
 local function canPlayerRevive(plr: Player): (boolean, boolean, string)
 	-- returns: canConsumeNow, canShowReviveButton, messageText
@@ -743,6 +716,7 @@ while true do
 			if not plr.Character then plr:LoadCharacter() end
 			task.wait(0.05)
 			teleportToLobby(plr)
+			matchState:FireClient(plr, true)
 		end)
 	end)
 
