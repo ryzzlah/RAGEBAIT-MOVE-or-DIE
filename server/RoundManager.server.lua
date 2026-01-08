@@ -236,21 +236,7 @@ local function alivePlayers(matchPlayers: {Player})
 end
 
 -- ===== SPECTATE =====
--- Anyone can request targets during a running match as long as they are NOT alive in-round.
-spectateEvent.OnServerEvent:Connect(function(plr, action)
-	if action ~= "GetTargets" then return end
-
-	if not MATCH_RUNNING then
-		spectateEvent:FireClient(plr, "Targets", {})
-		return
-	end
-
-	local alive = plr:GetAttribute("AliveInRound") == true
-	if alive then
-		spectateEvent:FireClient(plr, "Targets", {})
-		return
-	end
-
+local function getAliveUserIds()
 	local ids = {}
 	for _, p in ipairs(CURRENT_MATCH_PLAYERS) do
 		if p and p.Parent == Players then
@@ -259,7 +245,82 @@ spectateEvent.OnServerEvent:Connect(function(plr, action)
 			end
 		end
 	end
-	spectateEvent:FireClient(plr, "Targets", ids)
+	return ids
+end
+
+local function getIndex(ids, userId)
+	for i, v in ipairs(ids) do
+		if v == userId then
+			return i
+		end
+	end
+	return nil
+end
+
+local function canSpectate(plr: Player)
+	if not MATCH_RUNNING then
+		return false
+	end
+	return plr:GetAttribute("AliveInRound") ~= true
+end
+
+local function sendDefaultTarget(plr: Player)
+	local ids = getAliveUserIds()
+	if #ids == 0 then
+		spectateEvent:FireClient(plr, "NoTargets")
+		return
+	end
+	spectateEvent:FireClient(plr, "SetTarget", ids[1])
+end
+
+local function cycleTarget(plr: Player, dir: number)
+	local ids = getAliveUserIds()
+	if #ids == 0 then
+		spectateEvent:FireClient(plr, "NoTargets")
+		return
+	end
+
+	local current = plr:GetAttribute("SpectateTargetUserId")
+	local idx = current and getIndex(ids, current) or 1
+	local newIdx = idx + dir
+	if newIdx < 1 then newIdx = #ids end
+	if newIdx > #ids then newIdx = 1 end
+
+	local newTarget = ids[newIdx]
+	plr:SetAttribute("SpectateTargetUserId", newTarget)
+	spectateEvent:FireClient(plr, "SetTarget", newTarget)
+end
+
+-- Anyone can request targets during a running match as long as they are NOT alive in-round.
+spectateEvent.OnServerEvent:Connect(function(plr, action)
+	if action == "GetTargets" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "Targets", {})
+			return
+		end
+		spectateEvent:FireClient(plr, "Targets", getAliveUserIds())
+		return
+	end
+
+	if action == "RequestList" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "NoTargets")
+			return
+		end
+		sendDefaultTarget(plr)
+	elseif action == "Next" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "NoTargets")
+			return
+		end
+		cycleTarget(plr, 1)
+	elseif action == "Prev" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "NoTargets")
+			return
+		end
+		cycleTarget(plr, -1)
+	end
 end)
 
 -- ===== REVIVE HELPERS =====
@@ -743,6 +804,7 @@ while true do
 			if not plr.Character then plr:LoadCharacter() end
 			task.wait(0.05)
 			teleportToLobby(plr)
+			matchState:FireClient(plr, true)
 		end)
 	end)
 
