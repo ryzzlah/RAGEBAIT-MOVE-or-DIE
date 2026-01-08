@@ -1,56 +1,36 @@
--- StarterPlayerScripts/SpectateUI.client.lua
--- Fixed: reliable attribute watching + Exit returns camera only (UI stays)
--- Keeps your same UI style/placement.
+-- StarterPlayerScripts/SpectateClient.lua
+-- FIXED:
+-- ✅ Auto-spectate if you join mid-match (even if you're not InRound)
+-- ✅ Auto-spectate on elimination
+-- ✅ Hides ALL other ScreenGuis while spectating (except StatusUI + this SpectateGui)
+-- ✅ Exit restores UI properly
+-- ✅ Match end restores UI + stops spectating
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-local camera = workspace.CurrentCamera
 
-local SpectateEvent = ReplicatedStorage:WaitForChild("SpectateEvent")
-local MatchState = ReplicatedStorage:WaitForChild("MatchState")
+local matchState = ReplicatedStorage:WaitForChild("MatchState") -- RemoteEvent(bool inMatch)
+local spectateEvent = ReplicatedStorage:WaitForChild("SpectateEvent") -- RemoteEvent("RequestList" / "SpectateUserId", etc)
 
--- ===== helpers =====
+local inMatch = false
+local isSpectating = false
+local currentTargetUserId = nil
+
+-- ========= UI helpers =========
 local function mk(parent, class, props)
 	local o = Instance.new(class)
-	for k, v in pairs(props or {}) do
+	for k,v in pairs(props or {}) do
 		o[k] = v
 	end
 	o.Parent = parent
 	return o
 end
 
-local function getHum(plr: Player)
-	local ch = plr.Character
-	return ch and ch:FindFirstChildOfClass("Humanoid")
-end
-
-local function aliveTargetListFromUserIds(ids)
-	local list = {}
-	for _, uid in ipairs(ids) do
-		local p = Players:GetPlayerByUserId(uid)
-		if p and p ~= player then
-			table.insert(list, p)
-		end
-	end
-	return list
-end
-
-local function isDeadInRound()
-	return player:GetAttribute("InRound") == true and player:GetAttribute("AliveInRound") == false
-end
-
-local function setCameraToSelf()
-	local hum = getHum(player)
-	if hum then
-		camera.CameraType = Enum.CameraType.Custom
-		camera.CameraSubject = hum
-	end
-end
-
--- ===== UI =====
+-- Kill duplicates
 local old = playerGui:FindFirstChild("SpectateGui")
 if old then old:Destroy() end
 
@@ -59,232 +39,216 @@ local gui = mk(playerGui, "ScreenGui", {
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
 	Enabled = false,
-	DisplayOrder = -10,
+	DisplayOrder = 50, -- above normal UI, below hardcore popups
 })
 
-local BOTTOM_PAD = 24
-local W, H = 480, 56
-
-local frame = mk(gui, "Frame", {
+-- Put it where ReadyUI usually sits (bottom center)
+local panel = mk(gui, "Frame", {
 	AnchorPoint = Vector2.new(0.5, 1),
-	Position = UDim2.new(0.5, 0, 1, -BOTTOM_PAD),
-	Size = UDim2.new(0, W, 0, H),
-	BackgroundColor3 = Color3.fromRGB(25,25,25),
-	BorderSizePixel = 0,
+	Position = UDim2.new(0.5, 0, 1, -24),
+	Size = UDim2.new(0, 520, 0, 58),
+	BackgroundColor3 = Color3.fromRGB(18,18,18),
+	BackgroundTransparency = 0.15,
+	BorderSizePixel = 0
 })
-mk(frame, "UICorner", { CornerRadius = UDim.new(0, 14) })
-mk(frame, "UIStroke", { Thickness = 2, Color = Color3.fromRGB(65,190,235), Transparency = 0 })
+mk(panel, "UICorner", {CornerRadius = UDim.new(0, 14)})
+mk(panel, "UIStroke", {Thickness = 1, Color = Color3.fromRGB(60,60,60), Transparency = 0})
 
-local nameLbl = mk(frame, "TextLabel", {
+local title = mk(panel, "TextLabel", {
 	BackgroundTransparency = 1,
-	Position = UDim2.new(0, 12, 0, 0),
-	Size = UDim2.new(1, -160, 1, 0),
+	Size = UDim2.new(1, -170, 1, 0),
+	Position = UDim2.new(0, 14, 0, 0),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Font = Enum.Font.GothamBold,
+	TextSize = 18,
+	TextColor3 = Color3.fromRGB(255,255,255),
+	Text = "SPECTATING..."
+})
+
+local prevBtn = mk(panel, "TextButton", {
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(1, -146, 0.5, 0),
+	Size = UDim2.new(0, 56, 0, 38),
+	Text = "<",
 	Font = Enum.Font.GothamBold,
 	TextSize = 22,
 	TextColor3 = Color3.fromRGB(255,255,255),
-	TextXAlignment = Enum.TextXAlignment.Left,
-	Text = "Spectate",
+	BackgroundColor3 = Color3.fromRGB(35,35,35),
+	AutoButtonColor = true
 })
+mk(prevBtn, "UICorner", {CornerRadius = UDim.new(0, 10)})
 
-local function makeBtn(txt, x)
-	local b = mk(frame, "TextButton", {
-		Size = UDim2.new(0, 44, 0, 40),
-		Position = UDim2.new(0, x, 0.5, -20),
-		BackgroundColor3 = Color3.fromRGB(40,40,46),
-		Text = txt,
-		Font = Enum.Font.GothamBold,
-		TextSize = 18,
-		TextColor3 = Color3.fromRGB(255,255,255),
-		AutoButtonColor = true,
-	})
-	mk(b, "UICorner", { CornerRadius = UDim.new(0, 10) })
-	return b
+local nextBtn = mk(panel, "TextButton", {
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(1, -84, 0.5, 0),
+	Size = UDim2.new(0, 56, 0, 38),
+	Text = ">",
+	Font = Enum.Font.GothamBold,
+	TextSize = 22,
+	TextColor3 = Color3.fromRGB(255,255,255),
+	BackgroundColor3 = Color3.fromRGB(35,35,35),
+	AutoButtonColor = true
+})
+mk(nextBtn, "UICorner", {CornerRadius = UDim.new(0, 10)})
+
+local exitBtn = mk(panel, "TextButton", {
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(1, -16, 0.5, 0),
+	Size = UDim2.new(0, 56, 0, 38),
+	Text = "X",
+	Font = Enum.Font.GothamBold,
+	TextSize = 20,
+	TextColor3 = Color3.fromRGB(255,255,255),
+	BackgroundColor3 = Color3.fromRGB(235,65,65),
+	AutoButtonColor = true
+})
+mk(exitBtn, "UICorner", {CornerRadius = UDim.new(0, 10)})
+
+-- ========= Hide other UI while spectating =========
+local savedGuiEnabled = {}
+
+local function shouldKeepGui(screenGui: ScreenGui)
+	if screenGui == gui then return true end
+	if screenGui.Name == "StatusGui" then return true end -- keep Status UI visible
+	return false
 end
 
-local prevBtn = makeBtn("<", W - 140)
-local nextBtn = makeBtn(">", W - 90)
-local exitBtn = makeBtn("X", W - 44)
-exitBtn.BackgroundColor3 = Color3.fromRGB(200,60,60)
-
--- ===== state =====
-local inMatch = false
-local spectating = false
-local targets = {} -- Player list
-local idx = 1
-local camConn: RBXScriptConnection? = nil
-local requestToken = 0
-
-local function disconnectTargetConn()
-	if camConn then
-		camConn:Disconnect()
-		camConn = nil
+local function setOtherUIHidden(hidden: boolean)
+	if hidden then
+		table.clear(savedGuiEnabled)
+		for _, child in ipairs(playerGui:GetChildren()) do
+			if child:IsA("ScreenGui") and not shouldKeepGui(child) then
+				savedGuiEnabled[child] = child.Enabled
+				child.Enabled = false
+			end
+		end
+	else
+		for g, was in pairs(savedGuiEnabled) do
+			if g and g.Parent == playerGui then
+				g.Enabled = was
+			end
+		end
+		table.clear(savedGuiEnabled)
 	end
 end
 
-local function setUiEnabledForDead()
-	-- UI should be visible when match is running AND player is dead-in-round.
-	gui.Enabled = (inMatch and isDeadInRound())
-	if not gui.Enabled then
-		-- If we are not eligible, fully stop spectate and go back to self.
-		spectating = false
-		disconnectTargetConn()
-		setCameraToSelf()
-	end
-end
+-- ========= spectate camera =========
+local function setCameraToUserId(userId: number?)
+	local cam = workspace.CurrentCamera
+	if not cam then return end
 
-local function applyCameraToTarget(t: Player)
-	if not t then return end
-	local hum = getHum(t)
+	if not userId then
+		currentTargetUserId = nil
+		title.Text = "SPECTATING..."
+		cam.CameraSubject = (player.Character and player.Character:FindFirstChildWhichIsA("Humanoid")) or nil
+		cam.CameraType = Enum.CameraType.Custom
+		return
+	end
+
+	local targetPlr = Players:GetPlayerByUserId(userId)
+	if not targetPlr then return end
+	local char = targetPlr.Character
+	if not char then return end
+	local hum = char:FindFirstChildWhichIsA("Humanoid")
 	if not hum then return end
 
-	spectating = true
-	camera.CameraType = Enum.CameraType.Custom
-	camera.CameraSubject = hum
-	nameLbl.Text = ("Spectating: %s"):format(t.Name)
-
-	-- keep camera locked even if target respawns
-	disconnectTargetConn()
-	camConn = t.CharacterAdded:Connect(function()
-		task.wait(0.1)
-		if spectating then
-			local h = getHum(t)
-			if h then camera.CameraSubject = h end
-		end
-	end)
+	currentTargetUserId = userId
+	title.Text = ("SPECTATING: %s"):format(targetPlr.Name)
+	cam.CameraSubject = hum
+	cam.CameraType = Enum.CameraType.Custom
 end
 
-local function clampIndex()
-	if #targets == 0 then
-		idx = 1
-		return
+-- ========= state logic =========
+local function shouldSpectateNow()
+	if not inMatch then return false end
+
+	local inRoundAttr = player:GetAttribute("InRound") == true
+	local aliveAttr = player:GetAttribute("AliveInRound") == true
+
+	-- If match is running AND you're not actively alive in the round => spectate
+	-- This includes:
+	-- - eliminated players (alive=false)
+	-- - mid-round joiners sitting in lobby (inRound=false)
+	if (not inRoundAttr) or (not aliveAttr) then
+		return true
 	end
-	if idx < 1 then idx = #targets end
-	if idx > #targets then idx = 1 end
+	return false
 end
 
-local function spectateCurrent()
-	if #targets == 0 then
-		spectating = false
-		disconnectTargetConn()
-		setCameraToSelf()
-		nameLbl.Text = "No one alive"
-		return
-	end
-
-	clampIndex()
-	local t = targets[idx]
-	if not t or t.Parent ~= Players then
-		-- target left, ask again
-		SpectateEvent:FireServer("GetTargets")
-		return
-	end
-
-	applyCameraToTarget(t)
+local function enterSpectate()
+	if isSpectating then return end
+	isSpectating = true
+	gui.Enabled = true
+	setOtherUIHidden(true)
+	spectateEvent:FireServer("RequestList")
 end
 
-local function refreshTargets()
-	requestToken += 1
-	local myTok = requestToken
-
-	SpectateEvent:FireServer("GetTargets")
-
-	-- small fallback message if server returns empty
-	task.delay(1.2, function()
-		if requestToken ~= myTok then return end
-		if gui.Enabled and (#targets == 0) then
-			nameLbl.Text = "No one alive"
-		end
-	end)
+local function exitSpectate()
+	if not isSpectating then return end
+	isSpectating = false
+	gui.Enabled = false
+	setOtherUIHidden(false)
+	setCameraToUserId(nil)
 end
 
-local function ensureSpectateMode()
-	-- Called whenever match state / alive state changes
-	setUiEnabledForDead()
-	if not gui.Enabled then return end
-
-	-- When you first become dead, show UI and fetch targets.
-	-- Do NOT force spectating. Let Exit keep UI visible.
-	if not spectating then
-		nameLbl.Text = "Spectate (tap < or >)"
-		setCameraToSelf()
+local function refreshState()
+	if shouldSpectateNow() then
+		enterSpectate()
+	else
+		exitSpectate()
 	end
-
-	refreshTargets()
 end
 
--- ===== remote responses =====
-SpectateEvent.OnClientEvent:Connect(function(kind, payload)
-	if kind ~= "Targets" then return end
-	if not gui.Enabled then return end
-
-	local ids = (typeof(payload) == "table") and payload or {}
-	targets = aliveTargetListFromUserIds(ids)
-
-	-- If we are actively spectating, keep it updated.
-	if spectating then
-		if #targets == 0 then
-			spectating = false
-			disconnectTargetConn()
-			setCameraToSelf()
-			nameLbl.Text = "No one alive"
-			return
-		end
-		clampIndex()
-		spectateCurrent()
-	end
-end)
-
--- ===== buttons =====
-local function startOrCycle(delta)
-	if not gui.Enabled then return end
-	if #targets == 0 then
-		refreshTargets()
-		return
-	end
-	idx += delta
-	clampIndex()
-	spectateCurrent()
-end
-
+-- Buttons
 prevBtn.MouseButton1Click:Connect(function()
-	startOrCycle(-1)
+	if not isSpectating then return end
+	spectateEvent:FireServer("Prev")
 end)
 
 nextBtn.MouseButton1Click:Connect(function()
-	startOrCycle(1)
+	if not isSpectating then return end
+	spectateEvent:FireServer("Next")
 end)
 
 exitBtn.MouseButton1Click:Connect(function()
-	-- Per your instruction:
-	-- Exit ONLY switches camera back to your character, UI stays.
-	spectating = false
-	disconnectTargetConn()
-	setCameraToSelf()
-	nameLbl.Text = "Spectate (tap < or >)"
+	-- This is a CLIENT exit. You still might be dead, so we do:
+	-- - restore UI (so they can chill)
+	-- - camera back to self
+	-- - keep spectate UI closed until they press next/prev again
+	exitSpectate()
 end)
 
--- ===== match state =====
-MatchState.OnClientEvent:Connect(function(v)
-	inMatch = (v == true)
-	ensureSpectateMode()
-end)
-
--- ===== proper attribute watchers (your old code was wrong) =====
-player:GetAttributeChangedSignal("AliveInRound"):Connect(function()
-	ensureSpectateMode()
-end)
-
-player:GetAttributeChangedSignal("InRound"):Connect(function()
-	ensureSpectateMode()
-end)
-
--- Handle respawns so self-camera doesn't get stuck on nil humanoid
-player.CharacterAdded:Connect(function()
-	task.wait(0.1)
-	if not spectating then
-		setCameraToSelf()
+-- Server pushes target
+spectateEvent.OnClientEvent:Connect(function(kind, payload)
+	if kind == "SetTarget" then
+		if typeof(payload) == "number" then
+			setCameraToUserId(payload)
+		else
+			setCameraToUserId(nil)
+		end
+	elseif kind == "NoTargets" then
+		setCameraToUserId(nil)
+		title.Text = "SPECTATING: (no one alive)"
 	end
 end)
 
--- initial
-ensureSpectateMode()
+-- Match start/end
+matchState.OnClientEvent:Connect(function(state)
+	inMatch = state == true
+	if not inMatch then
+		-- Match ended: hard reset spectate
+		exitSpectate()
+	else
+		refreshState()
+	end
+end)
+
+-- Attribute changes (elimination, join mid-round, etc)
+player:GetAttributeChangedSignal("InRound"):Connect(refreshState)
+player:GetAttributeChangedSignal("AliveInRound"):Connect(refreshState)
+
+-- If they spawn in while match is already running, this catches it
+task.defer(function()
+	refreshState()
+end)
+
