@@ -4,9 +4,12 @@
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local matchStateEvent = ReplicatedStorage:WaitForChild("MatchState")
+local roundInfoEvent = ReplicatedStorage:WaitForChild("RoundInfo")
 
 local function mk(parent, className, props)
 	local o = Instance.new(className)
@@ -41,6 +44,24 @@ local gui = mk(playerGui, "ScreenGui", {
 	DisplayOrder = 5, -- above most normal HUD, below popups
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 })
+
+local function setVisible(isVisible: boolean)
+	gui.Enabled = isVisible
+end
+
+matchStateEvent.OnClientEvent:Connect(function(state)
+	setVisible(state ~= true)
+end)
+
+roundInfoEvent.OnClientEvent:Connect(function(payload)
+	if typeof(payload) ~= "table" then
+		return
+	end
+
+	if payload.inMatch ~= nil then
+		setVisible(payload.inMatch ~= true)
+	end
+end)
 
 local frame = mk(gui, "Frame", {
 	AnchorPoint = Vector2.new(0, 1),
@@ -148,4 +169,3 @@ task.defer(function()
 	-- still no leaderstats? fine, attribute fallback stays
 	watchLeaderstats()
 end)
-
