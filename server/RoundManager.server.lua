@@ -89,6 +89,8 @@ local reviveRemote  = getOrMakeRemote("ReviveRemote")
 -- NEW structured timer feed (StatusUI can subscribe without breaking old text)
 local roundInfoEvent = getOrMakeRemote("RoundInfo")
 
+local _SpectateService = require(script.Parent:WaitForChild("SpectateService"))
+
 local function broadcast(msg: string)
 	statusEvent:FireAllClients(tostring(msg))
 end
@@ -743,6 +745,7 @@ while true do
 			if not plr.Character then plr:LoadCharacter() end
 			task.wait(0.05)
 			teleportToLobby(plr)
+			matchState:FireClient(plr, true)
 		end)
 	end)
 

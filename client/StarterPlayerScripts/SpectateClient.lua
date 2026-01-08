@@ -19,6 +19,7 @@ local spectateEvent = ReplicatedStorage:WaitForChild("SpectateEvent") -- RemoteE
 local inMatch = false
 local isSpectating = false
 local currentTargetUserId = nil
+local spectateOptOut = false
 
 -- ========= UI helpers =========
 local function mk(parent, class, props)
@@ -161,6 +162,7 @@ end
 -- ========= state logic =========
 local function shouldSpectateNow()
 	if not inMatch then return false end
+	if spectateOptOut then return false end
 
 	local inRoundAttr = player:GetAttribute("InRound") == true
 	local aliveAttr = player:GetAttribute("AliveInRound") == true
@@ -178,6 +180,7 @@ end
 local function enterSpectate()
 	if isSpectating then return end
 	isSpectating = true
+	spectateOptOut = false
 	gui.Enabled = true
 	setOtherUIHidden(true)
 	spectateEvent:FireServer("RequestList")
@@ -215,6 +218,7 @@ exitBtn.MouseButton1Click:Connect(function()
 	-- - restore UI (so they can chill)
 	-- - camera back to self
 	-- - keep spectate UI closed until they press next/prev again
+	spectateOptOut = true
 	exitSpectate()
 end)
 
@@ -237,6 +241,7 @@ matchState.OnClientEvent:Connect(function(state)
 	inMatch = state == true
 	if not inMatch then
 		-- Match ended: hard reset spectate
+		spectateOptOut = false
 		exitSpectate()
 	else
 		refreshState()
@@ -245,10 +250,14 @@ end)
 
 -- Attribute changes (elimination, join mid-round, etc)
 player:GetAttributeChangedSignal("InRound"):Connect(refreshState)
-player:GetAttributeChangedSignal("AliveInRound"):Connect(refreshState)
+player:GetAttributeChangedSignal("AliveInRound"):Connect(function()
+	if player:GetAttribute("AliveInRound") == true then
+		spectateOptOut = false
+	end
+	refreshState()
+end)
 
 -- If they spawn in while match is already running, this catches it
 task.defer(function()
 	refreshState()
 end)
-
