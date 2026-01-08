@@ -1,10 +1,10 @@
--- ServerScriptService/SpectateService (ModuleScript)
+-- ServerScriptService/SpectateService (ServerScript)
+-- Handles spectate cycling independently of RoundManager to avoid module load issues.
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local spectateEvent = ReplicatedStorage:WaitForChild("SpectateEvent")
-
-local SpectateService = {}
 
 local function getAliveUserIds()
 	local ids = {}
@@ -25,7 +25,11 @@ local function getIndex(ids, userId)
 	return nil
 end
 
-local function sendDefault(plr)
+local function canSpectate(plr: Player)
+	return plr:GetAttribute("AliveInRound") ~= true
+end
+
+local function sendDefault(plr: Player)
 	local ids = getAliveUserIds()
 	if #ids == 0 then
 		spectateEvent:FireClient(plr, "NoTargets")
@@ -34,7 +38,7 @@ local function sendDefault(plr)
 	spectateEvent:FireClient(plr, "SetTarget", ids[1])
 end
 
-local function cycle(plr, dir)
+local function cycle(plr: Player, dir: number)
 	local ids = getAliveUserIds()
 	if #ids == 0 then
 		spectateEvent:FireClient(plr, "NoTargets")
@@ -55,31 +59,22 @@ end
 
 spectateEvent.OnServerEvent:Connect(function(plr, action)
 	if action == "RequestList" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "NoTargets")
+			return
+		end
 		sendDefault(plr)
 	elseif action == "Next" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "NoTargets")
+			return
+		end
 		cycle(plr, 1)
 	elseif action == "Prev" then
+		if not canSpectate(plr) then
+			spectateEvent:FireClient(plr, "NoTargets")
+			return
+		end
 		cycle(plr, -1)
 	end
 end)
-
--- Helper calls
-function SpectateService.MarkEliminated(plr: Player)
-	plr:SetAttribute("AliveInRound", false)
-end
-
-function SpectateService.SetInMatchLobbySpectate(plr: Player)
-	-- Mid-round joiner: not in round, not alive in round, but match running
-	plr:SetAttribute("InRound", false)
-	plr:SetAttribute("AliveInRound", false)
-	plr:SetAttribute("SpectateTargetUserId", nil)
-end
-
-function SpectateService.ClearPlayer(plr: Player)
-	plr:SetAttribute("InRound", false)
-	plr:SetAttribute("AliveInRound", false)
-	plr:SetAttribute("SpectateTargetUserId", nil)
-end
-
-return SpectateService
-
