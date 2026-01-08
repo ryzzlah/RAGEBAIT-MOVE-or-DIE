@@ -212,6 +212,15 @@ if player.Character then attachCharacter(player.Character) end
 -- ===== INPUT (PC SHIFT via CAS) =====
 local ACTION_NAME = "SprintAction"
 
+local function hideCasMobileButton()
+	pcall(function()
+		local casBtn = CAS:GetButton(ACTION_NAME)
+		if casBtn then
+			casBtn.Visible = false
+		end
+	end)
+end
+
 local function setSprintIntent(on)
 	wantsSprint = on and stamina > 0.001
 end
@@ -228,15 +237,13 @@ end
 CAS:BindAction(ACTION_NAME, sprintAction, true, Enum.KeyCode.LeftShift, Enum.KeyCode.RightShift)
 
 -- Hide CAS mobile button (we're using your UI button on mobile)
-pcall(function()
-	local casBtn = CAS:GetButton(ACTION_NAME)
-	if casBtn then
-		casBtn.Visible = false
-	end
-end)
+hideCasMobileButton()
 
 -- ===== MOBILE: hook YOUR button =====
 local mobileBtnConnBegan, mobileBtnConnEnded
+local mobileBtnStyleConns = {}
+local mobileControlsConnAdded, mobileControlsConnRemoved
+local mobileControls
 local mobileBtn -- ImageButton
 
 local function findSprintButton()
@@ -275,9 +282,36 @@ local function styleAndPlaceMobileButton(btn: ImageButton)
 	sc.MaxSize = Vector2.new(MOBILE_MAX_SIZE, MOBILE_MAX_SIZE)
 end
 
+local function clearMobileButtonStyleConns()
+	for _, conn in ipairs(mobileBtnStyleConns) do
+		conn:Disconnect()
+	end
+	table.clear(mobileBtnStyleConns)
+end
+
+local function ensureMobileButtonStyle()
+	if not mobileBtn then return end
+	if not isMobile() then
+		mobileBtn.Visible = false
+		return
+	end
+
+	local expectedSize = UDim2.new(0, MOBILE_TARGET_SIZE, 0, MOBILE_TARGET_SIZE)
+	local expectedPosition = UDim2.new(1, MOBILE_OFFSET_X, 1, MOBILE_OFFSET_Y)
+	local expectedAnchor = Vector2.new(1, 1)
+
+	if mobileBtn.Size ~= expectedSize
+		or mobileBtn.Position ~= expectedPosition
+		or mobileBtn.AnchorPoint ~= expectedAnchor
+		or mobileBtn.Visible ~= true then
+		styleAndPlaceMobileButton(mobileBtn)
+	end
+end
+
 local function disconnectMobileBtn()
 	if mobileBtnConnBegan then mobileBtnConnBegan:Disconnect() mobileBtnConnBegan = nil end
 	if mobileBtnConnEnded then mobileBtnConnEnded:Disconnect() mobileBtnConnEnded = nil end
+	clearMobileButtonStyleConns()
 end
 
 local function hookMobileButton()
@@ -286,6 +320,7 @@ local function hookMobileButton()
 
 	styleAndPlaceMobileButton(mobileBtn)
 	disconnectMobileBtn()
+	hideCasMobileButton()
 
 	if not isMobile() then
 		return
@@ -302,13 +337,47 @@ local function hookMobileButton()
 		if input.UserInputType ~= Enum.UserInputType.Touch then return end
 		wantsSprint = false
 	end)
+
+	table.insert(mobileBtnStyleConns, mobileBtn:GetPropertyChangedSignal("Size"):Connect(ensureMobileButtonStyle))
+	table.insert(mobileBtnStyleConns, mobileBtn:GetPropertyChangedSignal("Position"):Connect(ensureMobileButtonStyle))
+	table.insert(mobileBtnStyleConns, mobileBtn:GetPropertyChangedSignal("AnchorPoint"):Connect(ensureMobileButtonStyle))
+	table.insert(mobileBtnStyleConns, mobileBtn:GetPropertyChangedSignal("Visible"):Connect(ensureMobileButtonStyle))
 end
 
 -- Try now, and also re-try if UI loads late
 hookMobileButton()
+local function setMobileControls(target)
+	if mobileControlsConnAdded then mobileControlsConnAdded:Disconnect() mobileControlsConnAdded = nil end
+	if mobileControlsConnRemoved then mobileControlsConnRemoved:Disconnect() mobileControlsConnRemoved = nil end
+	mobileControls = target
+
+	if not mobileControls then return end
+
+	mobileControlsConnAdded = mobileControls.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("ImageButton") and descendant.Name == "SprintButton" then
+			task.defer(hookMobileButton)
+		end
+	end)
+
+	mobileControlsConnRemoved = mobileControls.DescendantRemoving:Connect(function(descendant)
+		if descendant:IsA("ImageButton") and descendant.Name == "SprintButton" then
+			task.defer(hookMobileButton)
+		end
+	end)
+end
+
 playerGui.ChildAdded:Connect(function(child)
 	if child.Name == "MobileControls" then
+		hideCasMobileButton()
+		setMobileControls(child)
 		task.defer(hookMobileButton)
+	end
+end)
+
+setMobileControls(playerGui:FindFirstChild("MobileControls"))
+playerGui.ChildRemoved:Connect(function(child)
+	if child == mobileControls then
+		setMobileControls(nil)
 	end
 end)
 
@@ -372,4 +441,3 @@ RunService.RenderStepped:Connect(function(dt)
 		end
 	end
 end)
-
